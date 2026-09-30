@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+
+# Runtime logs and generated cache
+*.log
+__pycache__/
+*.py[cod]
+
+# Local virtual environments and OS metadata
+.venv/
+venv/
+.DS_Store
