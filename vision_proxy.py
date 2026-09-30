@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-vision-proxy —— 给纯文本模型(DeepSeek 等)装一双眼睛
+vision-proxy —— 为 Claude 客户端补充图片理解
 
-链路:  Claude Code  ->  本代理(:8787)  ->  cc-switch(:15721)  ->  DeepSeek
+链路:  Claude 客户端  ->  本代理(:8787)  ->  Anthropic Messages 兼容上游
 
 原理:拦截 Anthropic 格式 /v1/messages 请求体里的 image 块,
      发给一个支持视觉的 OpenAI 兼容模型转成文字,
@@ -35,7 +35,7 @@ CACHE_FILE   = Path(os.environ.get(
     "VISION_CACHE", str(Path.home() / ".cache" / "vision-proxy" / "cache.json")))
 
 # 模型映射:把 Claude 桌面端发来的模型名映射成上游真实模型名。
-# 格式 "claude-opus-4-8=xopdeepseekv4pro,claude-haiku-4-5=xopglm52"。
+# 格式 "claude-sonnet-4-5=your-upstream-model"。
 # 设了 UPSTREAM 直指真实网关时,这替代了 cc-switch 原本做的映射,避免环路。
 MODEL_MAP = {}
 for _pair in os.environ.get("MODEL_MAP", "").split(","):

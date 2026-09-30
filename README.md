@@ -1,122 +1,88 @@
-# vision-proxy
+# Claude Vision Proxy
 
-给 DeepSeek 这类**纯文本模型**装一双眼睛。在 Claude 桌面端里正常粘贴/拖拽截图,
-代理会自动把图片交给视觉模型转成文字,再把文字喂给 DeepSeek —— DeepSeek 全程无感。
+为 Claude Desktop 和 Claude Code 增加图片输入支持。代理把 Claude 请求中的图片交给任意支持图片输入的 **OpenAI Chat Completions 兼容接口**转换成文字，再将图片替换为转写内容并转发给上游。
 
-## 当前架构(2026-08-25 验证通过)
+## 接口协议
 
-```
-Claude 桌面端
-   ↓  base_url = 127.0.0.1:15721/claude-desktop (CC Switch 注入,不可改)
-CC Switch (15721)
-   ↓  当前选「星火」provider, base_url 改成 http://127.0.0.1:8787
-vision-proxy (8787)
-   ↓  1. 拦截 image block → 调 xopqwen35v35b 转文字
-   ↓  2. 模型映射 claude-opus-4-8 → xopdeepseekv4pro (替代 CC Switch 的映射)
-   ↓  3. 透传 x-api-key 鉴权头
-星火真实端点 https://maas-api.cn-huabei-1.xf-yun.com/anthropic
-   ↓
-DeepSeek
+- `VISION_BASE_URL`：视觉模型服务的 OpenAI 兼容 API 根地址。代理会请求其 `/chat/completions` 路径。
+- `UPSTREAM_BASE_URL`：Claude 请求的上游，必须兼容 Anthropic Messages API。可以是 CC Switch，也可以是其他 Anthropic 兼容服务。
+
+Claude 客户端发送的是 Anthropic Messages 格式，因此上游仍需支持该协议。本项目不会把 Claude 请求转换成 OpenAI Chat Completions 格式。
+
+```text
+Claude Desktop / Claude Code
+  -> vision-proxy
+     -> 图片转写：OpenAI Chat Completions 兼容视觉接口
+     -> 原请求转发：Anthropic Messages 兼容上游
 ```
 
-**为什么不走 cc-switch 做映射了?** 因为如果 vision-proxy 上游指回 cc-switch(15721),
-而 cc-switch 的「星火」provider base_url 又指向 8787,会成环死循环。所以让 vision-proxy
-直连星火真实端点,并自己兼做模型映射,绕开 cc-switch 这一层。
+## 配置
 
-## .env 关键配置
-
-复制 `.env.example` 为 `.env`，再填写自己的 API 地址和密钥。`.env` 不应提交到 Git。
+复制 `.env.example` 为 `.env`，填写自己的服务地址、模型名和密钥。`.env` 不应提交到 Git。
 
 ```bash
-# 视觉模型(星火 maas 上的 Qwen3.5-VL-35B,已实测可用)
-VISION_BASE_URL=https://maas-api.cn-huabei-1.xf-yun.com/v2
-VISION_API_KEY=your-api-key
-VISION_MODEL=xopqwen35v35b
+cp .env.example .env
+```
 
-# 上游直连星火真实 Anthropic 端点
-UPSTREAM_BASE_URL=https://maas-api.cn-huabei-1.xf-yun.com/anthropic
-# 模型映射(替代 cc-switch 的 claudeDesktopModelRoutes)
-MODEL_MAP=claude-opus-4-8=xopdeepseekv4pro,claude-haiku-4-5=xopglm52,claude-sonnet-5=xopdeepseekv4flash0731,claude-fable-5=xopglm52
+关键配置：
+
+```dotenv
+# OpenAI Chat Completions 兼容接口根地址，不要附加 /chat/completions
+VISION_BASE_URL=https://your-openai-compatible-provider.example/v1
+VISION_API_KEY=replace-with-your-api-key
+VISION_MODEL=your-image-capable-model
+
+# Anthropic Messages 兼容上游；默认指向本机 CC Switch
+UPSTREAM_BASE_URL=http://127.0.0.1:15721
+
+# 可选：将 Claude 请求中的模型名映射为上游实际模型名
+MODEL_MAP=claude-sonnet-4-5=your-upstream-model
 PORT=8787
 ```
+
+`VISION_MODEL` 必须支持图片输入。`MODEL_MAP` 格式为 `请求模型名=上游模型名`，多组用逗号分隔；上游模型名相同时可以留空。
 
 ## 启动
 
 ```bash
-cd /path/to/vision-proxy && ./start.sh
+./start.sh
 ```
 
-后台常驻:
+代理默认监听本机 `127.0.0.1:8787`。在 Claude 客户端或 CC Switch 中，将 Anthropic API 的 `base_url` 指向：
 
-```bash
-cd /path/to/vision-proxy && nohup ./start.sh > proxy.log 2>&1 &
+```text
+http://127.0.0.1:8787
 ```
 
-自检:
+不要让 CC Switch 同时指向代理、又让代理的 `UPSTREAM_BASE_URL` 指回 CC Switch，以免形成循环。
+
+健康检查：
 
 ```bash
 curl -s http://127.0.0.1:8787/__vision/health
 ```
 
-应返回 `"vision_configured": true`。
+## 环境变量
 
-## 让 Claude 桌面端走代理(最后一步,会断当前会话)
-
-⚠️ **这步必须在 CC Switch UI 里做,改 settings.json 对桌面端无效!**
-   桌面端 base_url 被 app 进程注入(`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`),
-   不读 `~/.claude/settings.json`。
-
-步骤:
-1. 打开 CC Switch app
-2. 找到当前选中的「星火」provider(claude-desktop 类型)
-3. 编辑它,把 base_url 从
-   `https://maas-api.cn-huabei-1.xf-yun.com/anthropic`
-   改成 `http://127.0.0.1:8787`
-4. 保存,**重启 Claude 桌面端**
-
-重启后新会话即走 vision-proxy。
-
-## 验证
-
-在 Claude 桌面端新会话里贴张截图问"这图里写了什么"。
-代理终端会打印:
-
-```
-🔄 模型映射 claude-opus-4-8 -> xopdeepseekv4pro
-👁  转写 1 张图片,耗时 3.2s
-```
-
-## 回滚
-
-如果改完桌面端起不来:
-1. CC Switch 里把「星火」base_url 改回
-   `https://maas-api.cn-huabei-1.xf-yun.com/anthropic`
-2. 重启 Claude 桌面端
-
-链路恢复原样,不影响已建立的会话。
-
-## 设计说明
-
-- **模型映射**: `MODEL_MAP` 环境变量,格式 `a=b,c=d`。替代 cc-switch 的 claudeDesktopModelRoutes,
-  让 vision-proxy 直连星火真实端点时也能正确路由到 DeepSeek。
-- **缓存**: 按图片内容 sha256 缓存转写结果,存 `~/.cache/vision-proxy/cache.json`。
-  同一张图多轮对话只调一次视觉 API。
-- **上下文提示**: 同一条消息里的文字作为提示传给视觉模型,让它知道该重点看什么。
-- **覆盖 tool_result**: Claude Code 的 `Read` 工具读图产生的是 `tool_result` 里的嵌套 image 块,
-  递归遍历同样能抓到。
-- **失败降级**: 视觉 API 挂了就把图片替换成 `[图片识别失败:xxx]`,请求照常转发。
-- **透明转发**: 除 `/v1/messages` 外的所有路径原样透传,流式 SSE 逐块转发不缓冲。
-
-## 调参
-
-| 环境变量 | 默认 | 说明 |
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `PORT` | 8787 | 代理监听端口 |
-| `UPSTREAM_BASE_URL` | 星火真实端点 | 上游(直连星火,不走 cc-switch) |
-| `MODEL_MAP` | 见上 | Claude 模型名 → 星火模型名映射 |
-| `VISION_CONCURRENCY` | 4 | 一条消息多张图时的并发 |
-| `VISION_MAX_TOKENS` | 3000 | 单图转写最大长度 |
-| `VISION_TIMEOUT` | 120 | 视觉 API 超时(秒) |
-| `VISION_CACHE` | `~/.cache/vision-proxy/cache.json` | 缓存文件位置 |
+| `VISION_BASE_URL` | 空 | OpenAI 兼容视觉 API 根地址 |
+| `VISION_API_KEY` | 空 | 视觉 API 密钥 |
+| `VISION_MODEL` | 空 | 支持图片输入的模型名 |
+| `UPSTREAM_BASE_URL` | `http://127.0.0.1:15721` | Anthropic Messages 兼容上游 |
+| `MODEL_MAP` | 空 | 请求模型名到上游模型名的映射 |
+| `PORT` | `8787` | 本地代理端口 |
+| `VISION_CONCURRENCY` | `4` | 单个请求中图片识别并发数 |
+| `VISION_MAX_TOKENS` | `3000` | 单图转写最大长度 |
+| `VISION_TIMEOUT` | `120` | 视觉 API 超时秒数 |
+| `VISION_CACHE` | `~/.cache/vision-proxy/cache.json` | 图片转写缓存路径 |
 
-转写质量不满意就改 `vision_proxy.py` 里的 `PROMPT` 常量。
+## 工作方式
+
+- 按图片内容的 SHA-256 缓存转写结果，同一张图不会重复调用视觉 API。
+- 同一条消息中的文字会作为视觉提示，帮助模型聚焦用户的问题。
+- Claude Code 的 `tool_result` 中嵌套图片也会被递归处理。
+- 图片转写失败时会替换为错误提示，并继续转发请求。
+- 除消息接口外，其余路径和流式响应会透明转发。
+
+可在 `vision_proxy.py` 中调整图片转写提示词 `PROMPT`。
